@@ -1,0 +1,102 @@
+From: haotian bring-up
+Subject: [PATCH] haotian: XNU early boot stage markers
+
+0010 already marks the first instruction pair with a white block, and the
+early console only starts once arm_init runs.  The step in between is
+completely silent, so paint one 64x32 block per milestone on the splash
+frame buffer (row 3136, block N at x = N*64).
+
+Colours: 1 red (stacks/lr), 2 green (page tables), 3 blue (TCR/TTBR/MAIR),
+4 yellow (MMU just enabled), 5 cyan (CPACR/tpidr done), 6 magenta (about
+to return into arm_init).  Any block that is missing is the first step
+that did not complete.
+
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -447,6 +447,31 @@
+ 2:
+ .endmacro
+ 
++#if defined(SWEET)
++/*
++ * Bring-up stage marker: fill a 64x32 block at row 3136 of the splash
++ * framebuffer, one block per stage.  x0-x5 are dead at every call site, and
++ * the stack is not touched because sp holds a KVA until the MMU is enabled.
++ */
++.macro SWEET_MARK num, color
++	MOV64	x0, (0xfc800000 + 3136 * 5760 + (\num) * 64 * 4)
++	MOV64	x1, (\color)
++	mov		x2, #32
++	mov		x4, #5760
++9:
++	mov		x3, #64
++	mov		x5, x0
++8:
++	str		w1, [x5], #4
++	subs	x3, x3, #1
++	b.ne	8b
++	add		x0, x0, x4
++	subs	x2, x2, #1
++	b.ne	9b
++	dsb		sy
++.endm
++#endif
++
+ /*
+  * _start_first_cpu
+  * Cold boot init routine.  Called from __start
+@@ -530,6 +555,8 @@
+ 	add		lr, lr, x22							// Convert to KVA
+ 	sub		lr, lr, x23
+ 
++	SWEET_MARK 1, 0xffff0000	// stacks and lr ready
++
+ 	/*
+ 	 * Set up the bootstrap page tables with a single block entry for the V=P
+ 	 * mapping, a single block entry for the trampolined kernel address (KVA),
+@@ -647,6 +674,8 @@
+ 
+ 	/* Ensure TTEs are visible */
+ 	dsb		ish
++
++	SWEET_MARK 2, 0xff00ff00	// bootstrap page tables built
+ 
+ 
+ 	b		common_start
+@@ -721,6 +750,8 @@
+ 	tlbi	vmalle1
+ 	dsb		ish
+ 
++	SWEET_MARK 3, 0xff0000ff	// TCR/TTBR/MAIR set, MMU still off
++
+ 
+ #if defined(BCM2837)
+ 	// Setup timer interrupt routing; must be done before MMU is enabled
+@@ -781,6 +812,8 @@
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
+ 
++	SWEET_MARK 4, 0xffffff00	// MMU on
++
+ #if !VMAPPLE
+ 	MOV64   x1, SCTLR_EL1_DEFAULT
+ 	cmp		x0, x1
+@@ -801,6 +834,8 @@
+ 
+ 	// Clear thread pointer
+ 	msr		TPIDR_EL1, xzr						// Set thread register
++
++	SWEET_MARK 5, 0xff00ffff	// caches/MMU up, past CPACR
+ 
+ 
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+@@ -842,6 +877,8 @@
+ 	mov	x0, x20
+ 	mov	lr, x21
+ #endif
++
++	SWEET_MARK 6, 0xffff00ff	// returning into arm_init
+ 
+ 	// Return to arm_init()
+ 	ret
