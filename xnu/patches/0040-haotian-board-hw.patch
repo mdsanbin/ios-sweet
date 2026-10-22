@@ -1,0 +1,40 @@
+From: haotian bring-up
+Subject: [PATCH] haotian: board hardware numbers for the SWEET machine config
+
+The sweet machine config hardcodes two numbers that come from sweet's
+Qualcomm SM7150 DT and are wrong on haotian (SM8750):
+
+  * the architected timer PPIs are numbered the normal way 13/14/11/10
+    (secure phys / phys / virt / hyp) instead of sweet's 1/2/3/0, so the
+    virtual timer CNTV XNU uses is INTID 16 + 11 = 27, not 19;
+  * the redistributor stride is 0x40000 (8 x 256KB = the 2MB GICR region
+    the live FDT describes), not the 0x20000 of a plain GICv3 frame, so
+    iterating pe_fiq's redistributors by 0x20000 lands in the middle of a
+    frame and never finds this CPU's GICR_TYPER.
+
+GICD/GICR bases are not here: they come from the ADT's /arm-io/gic reg.
+Everything else in SWEET.h (16K pages, GICv3, Group 1 IRQs, 64 byte cache
+lines, MAX_CPUS 8) already matches haotian.
+
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -37,13 +37,13 @@
+ /*
+- * Qualcomm numbers the architected timer PPIs 1/2/3/0 (secure phys, phys,
+- * virt, hyp) instead of the usual 13/14/11/10: the virtual timer XNU uses
+- * (CNTV) is INTID 16 + 3 = 19.
++ * haotian (SM8750) numbers the architected timer PPIs the usual way,
++ * 13/14/11/10 (secure phys, phys, virt, hyp): the virtual timer XNU uses
++ * (CNTV) is INTID 16 + 11 = 27. (sweet's SM7150 uses 1/2/3/0 -> 19.)
+  */
+-#define SWEET_VTIMER_INTID        19
++#define SWEET_VTIMER_INTID        27
+ #define SWEET_IPI_SGI             1       // SGI used for cross-CPU signals
+ 
+ #define GIC_SPURIOUS_IRQ          1023    // IRQ no. for GIC spurious interrupt
+ 
+-#define GICR_PE_SIZE              0x20000 // Size of each redistributor region
++#define GICR_PE_SIZE              0x40000 // haotian GIC-700: 256KB stride (2MB GICR / 8)
+ 
+ /* GICv3 register definitions; see GICv3 spec (Arm IHI 0069G) */
