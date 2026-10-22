@@ -79,7 +79,7 @@ diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
  
 +	SWEET_MARK 4, 0xffffff00	// MMU on
 +
- #if !VMAPPLE
+ #if !VMAPPLE && !defined(SWEET)
  	MOV64   x1, SCTLR_EL1_DEFAULT
  	cmp		x0, x1
 @@ -801,6 +834,8 @@
