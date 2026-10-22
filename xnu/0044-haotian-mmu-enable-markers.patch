@@ -1,0 +1,42 @@
+From: haotian bring-up
+Subject: [PATCH] haotian: micro-markers around MMU enable
+
+Run 39797062357 reached marker 11 (tlbi done) but marker 4 (MMU on)
+did not paint.  Markers 12-15 bracket the second tlbi/ic, VBAR setup,
+and the SCTLR_EL1 write that turns the MMU on.  Marker 15 runs with the
+MMU already on, so it only paints if the bootstrap page tables correctly
+map the kernel text.
+
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -748,6 +748,8 @@
+ 	ic		iallu
+ #endif
+ 
++	SWEET_MARK 12, 0xffffa500	// micro-mark 12
++
+ 	/* If x21 is not 0, then this is either the start_cpu path or
+ 	 * the resume_idle_cpu path.  cpu_ttep should already be
+ 	 * populated, so just switch to the kernel_pmap now.
+@@ -777,14 +779,20 @@
+ 1:
+ 	MSR_VBAR_EL1_X0
+ 
++	SWEET_MARK 13, 0xff800080	// micro-mark 13
++
+ #if HAS_APPLE_PAC
+ 	PAC_INIT_KEY_STATE tmp=x0, tmp2=x1
+ #endif /* HAS_APPLE_PAC */
+ 
+ 	// Enable caches, MMU, ROP and JOP
+ 	MOV64   x0, SCTLR_EL1_DEFAULT
++
++	SWEET_MARK 14, 0xffffffff	// micro-mark 14
+ 	MSR_SCTLR_EL1_X0
+ 	isb		sy
++
++	SWEET_MARK 15, 0xff00ff00	// micro-mark 15
+ 
+ 	SWEET_MARK 4, 0xffffff00	// MMU on
+ 
