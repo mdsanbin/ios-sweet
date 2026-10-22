@@ -1,0 +1,46 @@
+From: haotian bring-up
+Subject: [PATCH] haotian: micro-markers between TCR write and blue stage
+
+Run 39790280608 painted stages 1-2 but died before stage 3.  Stages
+7-11 bracket every instruction in between (MSR_TCR, set_mmu_ttb,
+MSR_TTBR1, MAIR, tlbi) so the first missing block names the faulting
+write.
+
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -710,6 +710,8 @@
+ 	ldr		x1, [x0, SR_RESTORE_TCR_EL1]
+ 	MSR_TCR_EL1_X1
+ 
++	SWEET_MARK 7, 0xff00ff80	// micro-mark 7
++
+ 	/* Set up translation table base registers.
+ 	 *	TTBR0 - V=P table @ top of kernel
+ 	 *	TTBR1 - KVA table @ top of kernel + 1 page
+@@ -723,9 +725,13 @@
+ 	mov		x19, lr
+ 	bl		EXT(set_mmu_ttb)
+ 	mov		lr, x19
++
++	SWEET_MARK 8, 0xff808000	// micro-mark 8
+ 	add		x0, x25, PGBYTES
+ 	and		x0, x0, #(TTBR_BADDR_MASK)
+ 	MSR_TTBR1_EL1_X0
++
++	SWEET_MARK 9, 0xff0080ff	// micro-mark 9
+ 
+ 	// Set up MAIR attr0 for normal memory, attr1 for device memory
+ 	mov		x0, xzr
+@@ -747,7 +753,11 @@
+ 	orr		x0, x0, x1
+ 	msr		MAIR_EL1, x0
+ 	isb
++
++	SWEET_MARK 10, 0xffff80ff	// micro-mark 10
+ 	tlbi	vmalle1
++
++	SWEET_MARK 11, 0xffffff80	// micro-mark 11
+ 	dsb		ish
+ 
+ 	SWEET_MARK 3, 0xff0000ff	// TCR/TTBR/MAIR set, MMU still off
