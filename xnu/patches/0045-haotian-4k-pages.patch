@@ -1,0 +1,119 @@
+From: haotian bring-up
+Subject: [PATCH] haotian: build the 4KB-page kernel path
+
+The SM8750 Kryo has no 16KB translation granule.  On hardware the v5 probe
+showed that enabling the MMU with hand-built 4KB tables at 0xc9b3.. works
+(green slot) while the identical code with 16KB tables faults on the very
+first translated fetch (no yellow slot).  XNU's sweet config compiled
+__ARM_16K_PG__ 1, so its bootstrap TCR (TG0=0b10) made every `msr
+sctlr_el1` with M=1 die before executing one instruction.
+
+Switch to the generic 4KB path (the same one BCM2837 uses):
+  - drop __ARM_16K_PG__ from SWEET.h        -> T0SZ/T1SZ_BOOT 17 -> 25,
+    ARM_TT_* become the 4K layout, PAGE_SHIFT_CONST = ARM_PGSHIFT (12) for
+    a sub-1GB dram-size.
+  - start.s: the splash FB block was a single 32MB block; a 4K L2 block is
+    2MB, so map the whole 32MB window (16 blocks) from the 32MB-aligned
+    0xfc000000.  The V=P L2 table and L1 entry are shared with RAM for both
+    granules.
+  - arm_vm_init.c: same window for the kernel-VA FB alias that survives
+    bootstrap TTBR0 teardown (fixed 32MB VA window above low globals).
+
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -1831,22 +1831,26 @@
+  * Use the otherwise empty 32MB block above low globals and below gVirtBase
+  * for a Normal-NC framebuffer alias that survives bootstrap TTBR0 teardown.
+  */
+-#define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
++/* Fixed 32MB VA window; one ARM_TT_L2_SIZE block with 16K pages, 16 with 4K. */
++#define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + 0x2000000ULL)
+ 
+ static void
+ sweet_early_map_final(void)
+ {
+ 	const vm_map_address_t va = SWEET_EARLY_FB_VA;
+-	assert(va + ARM_TT_L2_SIZE <= gVirtBase);
++	assert(va + 0x2000000ULL <= gVirtBase);
+ 	tt_entry_t l1 = cpu_tte[(va & ARM_TT_L1_INDEX_MASK) >> ARM_TT_L1_SHIFT];
+ 	assert((l1 & (ARM_TTE_VALID | ARM_TTE_TYPE_MASK)) == (ARM_TTE_VALID | ARM_TTE_TYPE_TABLE));
+ 	tt_entry_t *l2 = (tt_entry_t *)phystokv(l1 & ARM_TTE_TABLE_MASK);
+ 	tt_entry_t *slot = &l2[(va & ARM_TT_L2_INDEX_MASK) >> ARM_TT_L2_SHIFT];
+-	assert(*slot == ARM_TTE_EMPTY);
+-	*slot = 0xfc800000ULL | ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
+-	    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
+-	    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
+-	    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	for (unsigned int i = 0; i < (0x2000000 / ARM_TT_L2_SIZE); i++) {
++		assert(slot[i] == ARM_TTE_EMPTY);
++		slot[i] = (0xfc000000ULL + (uint64_t)i * ARM_TT_L2_SIZE) |
++		    ARM_TTE_VALID | ARM_TTE_TYPE_BLOCK |
++		    ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) |
++		    ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) |
++		    ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX;
++	}
+ 	__asm__ volatile("dsb ishst" ::: "memory");
+ }
+ #endif
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -707,19 +707,27 @@
+ 
+ #if defined(SWEET)
+ 	/*
+-	 * Splash framebuffer: one 32MB Normal-NC block in the EXISTING V=P
+-	 * L2 table. Both framebuffer and RAM use L1 index 0; another call to
+-	 * create_bootstrap_mapping would replace the RAM L2 table.
+-	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+-	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
++	 * Splash framebuffer: Normal-NC blocks covering the 32MB window at
++	 * 0xfc000000 in the EXISTING V=P L2 table. RAM and the FB share the
++	 * same L1 entry with both granule sizes (haotian: L1 index 3 with 4K
++	 * pages, 0 with 16K), so another create_bootstrap_mapping call would
++	 * replace the RAM L2 table. The window base is ARM_TT_L2_SIZE aligned.
+ 	 */
+-	MOV64	x10, 0xfc800000
+ 	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+-	orr		x11, x11, x10
++	mov		x14, #(ARM_TT_L2_SHIFT)
++	mov		x15, #1
++	lsl		x15, x15, x14
++	mov		x16, #(0x2000000 / ARM_TT_L2_SIZE)
++	MOV64	x10, 0xfc000000
+ 	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+ 	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
+ 	add		x13, x25, #(2 * PGBYTES)
+-	str		x11, [x13, x12, lsl #TTE_SHIFT]
++1:	orr		x17, x11, x10
++	str		x17, [x13, x12, lsl #TTE_SHIFT]
++	add		x10, x10, x15
++	add		x12, x12, #1
++	subs	x16, x16, #1
++	b.ne	1b
+ #endif
+ 
+ 	/* Ensure TTEs are visible */
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -3,7 +3,7 @@
+  * Snapdragon 732G): Kryo 470 = Cortex-A76 + Cortex-A55, ARMv8.2, no PAC.
+  *
+  * Generic ARM like BCM2837 (no APPLE_ARM64_ARCH_FAMILY: none of Apple's
+- * implementation-defined system registers exist), 16K pages and GICv3 like
++ * implementation-defined system registers exist), 4K pages and GICv3 like
+  * VMAPPLE. Unlike VMAPPLE the GIC has two security states (GICD_TYPER
+  * SecurityExtn=1): Group 0 belongs to TrustZone, so every interrupt,
+  * including the timer, is a Group 1 IRQ taken through sleh_irq().
+@@ -34,7 +34,11 @@
+ #define __ARM_ENABLE_SWAP__       1
+ #define __ARM_V8_CRYPTO_EXTENSIONS__ 1
+ #define __ARM_PAN_AVAILABLE__     1
+-#define __ARM_16K_PG__            1
++/*
++ * haotian (SM8750) has no 16KB translation granule (ID_AA64MMFR0 TGran16
++ * reads not-supported; a 4KB-granule MMU enable works, a 16KB one faults
++ * on the first fetch), so build the generic 4KB-page kernel path.
++ */
+ 
+ #define HAS_GIC_V3                1
+ 
