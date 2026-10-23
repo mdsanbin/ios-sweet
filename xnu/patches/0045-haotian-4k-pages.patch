@@ -18,7 +18,28 @@ Switch to the generic 4KB path (the same one BCM2837 uses):
     granules.
   - arm_vm_init.c: same window for the kernel-VA FB alias that survives
     bootstrap TTBR0 teardown (fixed 32MB VA window above low globals).
+  - pmap.c: the 4K branch's commpage static assert only holds when the
+    userspace VA ends below the nesting region (63GB iOS layout), not for
+    this macOS-flavoured 128TB user VA build; skip it there.
 
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -10983,9 +10983,14 @@
+ #elif (ARM_PGSHIFT == 12)
+ /**
+  * Ensure that 64-bit devices using 4K pages can nest the commpage completely
+- * above the maximum userspace VA.
++ * above the maximum userspace VA.  That only holds when the userspace VA ends
++ * below the nesting region (the 63GB iOS layout).  A macOS-flavoured build
++ * keeps a 47-bit (128TB) userspace VA, where the commpage legitimately lives
++ * inside the user range and the VM reserves the nesting region instead.
+  */
++#if !defined(XNU_PLATFORM_MacOSX) && !defined(XNU_PLATFORM_DriverKit)
+ static_assert((_COMM_PAGE64_BASE_ADDRESS & ~ARM_TT_L1_OFFMASK) >= MACH_VM_MAX_ADDRESS);
++#endif
+ #else
+ #error Nested shared page mapping is unsupported on this config
+ #endif
 --- a/osfmk/arm64/arm_vm_init.c
 +++ b/osfmk/arm64/arm_vm_init.c
 @@ -1831,22 +1831,26 @@
